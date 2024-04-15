@@ -6,15 +6,20 @@
 #include <sys/socket.h>
 #include <sys/poll.h>
 #include <arpa/inet.h>
+#include <sys/shm.h>
+#include <errno.h>
 #include <pthread.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 200
 #define BUFFER_SIZE 1024
 
-pthread_mutex_t highest_prime_lock = PTHREAD_MUTEX_INITIALIZER;
-long long highest_prime = 0;
-int requestCounter = 0, clientCounter = 0;
+// Shared memory structure
+struct shared_memory {
+    long long highest_prime;
+    int request_counter;
+    pthread_mutex_t lock;
+};
 
 // Function to check primality
 int is_prime(long long num) {
@@ -26,45 +31,61 @@ int is_prime(long long num) {
     return 1;
 }
 
-void* client_handler(void *arg) {
-    int client_fd = *((int*)arg);
+void client_handler(int client_fd, struct shared_memory *shared_memory_ptr) {
     char buffer[BUFFER_SIZE];
     int valread = read(client_fd, buffer, BUFFER_SIZE - 1);
     if (valread > 0) {
         buffer[valread] = '\0';
         long long num = atoll(buffer);
         int prime = is_prime(num);
-        pthread_mutex_lock(&highest_prime_lock);
-        requestCounter++;
+
+        pthread_mutex_lock(&shared_memory_ptr->lock);
+        shared_memory_ptr->request_counter++;
         if (prime) {
-            if (num > highest_prime) highest_prime = num;
-            printf("Request #%d: %lld is prime. Highest prime: %lld\n", requestCounter, num, highest_prime);
+            if (num > shared_memory_ptr->highest_prime) 
+                shared_memory_ptr->highest_prime = num;
+            printf("Request #%d: %lld is prime. Highest prime: %lld\n", shared_memory_ptr->request_counter, num, shared_memory_ptr->highest_prime);
         } else {
-            printf("Request #%d: %lld is not prime.\n", requestCounter, num);
+            printf("Request #%d: %lld is not prime.\n", shared_memory_ptr->request_counter, num);
         }
         fflush(stdout);
 
-        sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", requestCounter, num, prime ? "" : "not ", highest_prime);
+        sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", shared_memory_ptr->request_counter, num, prime ? "" : "not ", shared_memory_ptr->highest_prime);
         send(client_fd, buffer, strlen(buffer), 0);
-        pthread_mutex_unlock(&highest_prime_lock);
+        pthread_mutex_unlock(&shared_memory_ptr->lock);
+
+        // Close the client socket
+        close(client_fd);
     } 
-    printf("\n");
-
-
+printf("\n");
 
     if (valread <= 0) {
         printf("Client disconnected: socket fd %d\n", client_fd);
         close(client_fd);
     }
-    free(arg);
-    return NULL;
 }
 
 int main() {
     int server_fd, new_socket, addrlen;
     struct sockaddr_in address;
     struct pollfd fds[MAX_CLIENTS];
-    pthread_t tid[MAX_CLIENTS];
+
+    // Creating shared memory segment
+    int shmid = shmget(IPC_PRIVATE, sizeof(struct shared_memory), IPC_CREAT | 0666);
+    if (shmid == -1) {
+        perror("shmget");
+        exit(EXIT_FAILURE);
+    }
+
+    struct shared_memory *shared_memory_ptr = (struct shared_memory *)shmat(shmid, NULL, 0);
+    if (shared_memory_ptr == (void *)-1) {
+        perror("shmat");
+        exit(EXIT_FAILURE);
+    }
+
+    shared_memory_ptr->highest_prime = 0;
+    shared_memory_ptr->request_counter = 0;
+    pthread_mutex_init(&shared_memory_ptr->lock, NULL);
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -112,33 +133,28 @@ int main() {
                 perror("accept");
                 continue;
             }
-            clientCounter++;
-            printf("Client number %d connected: socket fd is %d, ip is: %s, port: %d\n", clientCounter, new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+            printf("Client connected: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
 
-            for (int i = 1; i < MAX_CLIENTS; i++) {
-                if (fds[i].fd == 0) {
-                    fds[i].fd = new_socket;
-                    fds[i].events = POLLIN;
-                    break;
-                }
-            }
-        }
-
-        // Handle data from clients
-        for (int i = 1; i < MAX_CLIENTS; i++) {
-            if (fds[i].fd > 0 && (fds[i].revents & POLLIN)) {
-                int *arg = malloc(sizeof(*arg));
-                if (arg == NULL) {
-                    perror("Failed to allocate memory for client fd");
-                    continue;
-                }
-                *arg = fds[i].fd;
-                pthread_create(&tid[i], NULL, client_handler, arg);
-                pthread_detach(tid[i]);
-                fds[i].fd = 0; // Mark as available
+            // Fork a new process to handle the client
+            pid_t pid = fork();
+            if (pid < 0) {
+                perror("fork");
+            } else if (pid == 0) {
+                // Child process
+                close(server_fd); // Close the listening socket in the child process
+                client_handler(new_socket, shared_memory_ptr);
+                exit(EXIT_SUCCESS); // Exit the child process after handling the client
+            } else {
+                // Parent process
+                close(new_socket); // Close the new socket in the parent process
             }
         }
     }
+
+    // Detach shared memory
+    shmdt(shared_memory_ptr);
+    // Remove shared memory segment
+    shmctl(shmid, IPC_RMID, NULL);
 
     return 0;
 }
