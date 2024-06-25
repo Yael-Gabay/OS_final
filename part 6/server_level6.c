@@ -6,43 +6,43 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/poll.h>
 #include <arpa/inet.h>
 #include <time.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <errno.h>
 #include <pthread.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 200
 #define BUFFER_SIZE 1024
 #define ll long long
 
-// פונקציה לחישוב (base^exp) % mod
+// Function to calculate (base^exp) % mod
 ll powerMod(ll base, ll exp, ll mod) {
     ll result = 1;
     base = base % mod;
     while (exp > 0) {
-        if (exp % 2 == 1) // אם exp אי-זוגי
+        if (exp % 2 == 1)
             result = (result * base) % mod;
-        exp = exp >> 1; // חלוקה ב-2
+        exp = exp >> 1;
         base = (base * base) % mod;
     }
     return result;
 }
 
-// פונקציה שעושה את הבדיקה העיקרית של מילר-רבין
+// Function to perform Miller-Rabin primality test
 bool millerTest(ll d, ll n) {
-    ll a = 2 + rand() % (n - 4); // משתנה a: בחירת מספר אקראי בתחום [2, n-2]
-    ll x = powerMod(a, d, n);    // משתנה x: חישוב (a^d) % n
+    ll a = 2 + rand() % (n - 4);
+    ll x = powerMod(a, d, n);
 
     if (x == 1 || x == n - 1)
         return true;
 
-    // חישוב חוזר של x^2 % n
-    while (d != n - 1) { // משתנה d מחושב תחילה כ- n - 1 ומחולק ב-2 עד שהוא אי-זוגי
+    while (d != n - 1) {
         x = (x * x) % n;
-        d *= 2; // s (מספר הצעדים) 
+        d *= 2;
 
         if (x == 1)
             return false;
@@ -52,7 +52,7 @@ bool millerTest(ll d, ll n) {
     return false;
 }
 
-// פונקציה לבדוק ראשוניות בשיטת מילר-רבין
+// Function to check primality using Miller-Rabin method
 bool isPrime(ll n, int k) {
     if (n <= 1 || n == 4)
         return false;
@@ -70,103 +70,60 @@ bool isPrime(ll n, int k) {
     return true;
 }
 
-// נתינת המספר הראשון הגבוה ביותר
-ll getHighestPrime(ll *shared_memory) {
-    return *shared_memory;
-}
-
-// עדכון המספר הראשוני הגבוה ביותר
-void updateHighestPrime(ll *shared_memory, ll num) {
-    *shared_memory = num;
-}
-
-// פונקציה לטיפול בלקוח חדש בתהליך ילד
-void handle_client(int client_socket, ll *shared_memory) {
-    char buffer[BUFFER_SIZE];
-    int valread;
-    ll highest_prime = getHighestPrime(shared_memory);
-    int requestCounter = 0;
-
-    while (1) {
-        valread = read(client_socket, buffer, BUFFER_SIZE - 1);
-        if (valread > 0) {
-            buffer[valread] = '\0';
-            ll num = atoll(buffer);
-
-            // בדיקת ראשוניות ועדכון המספר הראשוני הגבוה ביותר
-            srand(time(0));
-            int prime = isPrime(num, 5);
-            requestCounter++;
-
-            if (prime) {
-                if (num > highest_prime) {
-                    highest_prime = num;
-                    updateHighestPrime(shared_memory, num);
-                }
-                printf("Request #%d: %lld is prime. Highest prime: %lld\n", requestCounter, num, highest_prime);
-            } else {
-                printf("Request #%d: %lld is not prime.\n", requestCounter, num);
-            }
-
-            sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", requestCounter, num, prime ? "" : "not ", highest_prime);
-            send(client_socket, buffer, strlen(buffer), 0);
-        } 
-        if (valread <= 0) {
-            printf("Client disconnected: socket fd %d\n", client_socket);
-            close(client_socket);
-            break;
-        }
-    }
-}
-
-// פונקציה לתהליך הדיווח (reporter)
-void reporter_process(ll *shared_memory) {
-    int count = 0;
-    ll highest_prime_reported = 0;
-
-    while (1) {
-        sleep(1); // המתנה לשנייה
-        if (*shared_memory > highest_prime_reported) {
-            highest_prime_reported = *shared_memory;
-            count++;
-            if (count % 100 == 0) {
-                printf("Report: Process detected %d numbers checked. The highest prime number so far is: %lld\n", count, highest_prime_reported);
-            }
-        }
-    }
-}
+// Structure for shared memory
+typedef struct {
+    ll highest_prime;
+    int request_counter;
+    pthread_mutex_t lock;
+} shared_data_t;
 
 int main() {
-    int server_fd, new_socket, valread;
+    int server_fd, new_socket, valread, addrlen;
     struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    int shmid;
-    ll *shared_memory;
+    struct pollfd fds[MAX_CLIENTS];
+    char buffer[BUFFER_SIZE];
 
-    // יצירת זיכרון משותף
-    shmid = shmget(IPC_PRIVATE, sizeof(ll), IPC_CREAT | 0666);
-    if (shmid < 0) {
-        perror("shmget");
+    // Create shared memory
+    int shm_fd;
+    shared_data_t *shared_memory;
+    const char *shm_name = "/prime_shared_memory";
+
+    shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
+    if (shm_fd < 0) {
+        perror("shm_open");
         exit(EXIT_FAILURE);
     }
 
-    shared_memory = (ll *)shmat(shmid, NULL, 0);
-    if (shared_memory == (ll *)-1) {
-        perror("shmat");
+    if (ftruncate(shm_fd, sizeof(shared_data_t)) == -1) {
+        perror("ftruncate");
         exit(EXIT_FAILURE);
     }
 
-    *shared_memory = 0; // אתחול המשתנה המשותף ל- 0
+    shared_memory = (shared_data_t *) mmap(NULL, sizeof(shared_data_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_memory == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
 
-    // יצירת כתובת וחיבור לשרת
+    // Initialize shared memory
+    shared_memory->highest_prime = 0;
+    shared_memory->request_counter = 0;
+    pthread_mutex_init(&shared_memory->lock, NULL);
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
@@ -178,46 +135,74 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
+    fds[0].fd = server_fd;
+    fds[0].events = POLLIN;
+    memset(fds + 1, 0, sizeof(struct pollfd) * (MAX_CLIENTS - 1));
+
     printf("The server is waiting for connections on port %d...\n", PORT);
 
-    // יצירת תהליך הדיווח
-    pid_t reporter_pid = fork();
-    if (reporter_pid < 0) {
-        perror("fork");
-        exit(EXIT_FAILURE);
-    } else if (reporter_pid == 0) {
-        // תהליך הדיווח
-        reporter_process(shared_memory);
-        exit(EXIT_SUCCESS);
-    }
-
     while (1) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("accept");
-            continue;
-        }
-        
-        printf("New connection: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-
-        // יצירת תהליך ילד עבור לקוח חדש
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            close(new_socket);
+        int activity = poll(fds, MAX_CLIENTS, -1);
+        if (activity < 0) {
+            perror("poll");
             continue;
         }
 
-        if (pid == 0) { // תהליך ילד
-            close(server_fd); // סגירת קצה השרת האם, לטובת התהליך הילד
-            handle_client(new_socket, shared_memory); // טיפול בלקוח המחובר
-            exit(0); // יציאה מהתהליך הילד
-        } else { // תהליך הורה
-            close(new_socket); // סגירת קצה הלקוח החדש, לטובת התהליך הורה
+        // Accept new connections
+        if (fds[0].revents & POLLIN) {
+            addrlen = sizeof(address);
+            new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+            if (new_socket < 0) {
+                perror("accept");
+                continue;
+            }
+
+            printf("New connection: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+
+            // Fork a new process for each client
+            pid_t pid = fork();
+            if (pid < 0) {
+                perror("fork");
+                continue;
+            } else if (pid == 0) {
+                // Child process handles client request
+                close(server_fd); // Child process doesn't need the listener socket
+
+                while (1) {
+                    valread = read(new_socket, buffer, BUFFER_SIZE - 1);
+                    if (valread > 0) {
+                        buffer[valread] = '\0';
+                        ll num = atoll(buffer);
+                        int prime = isPrime(num, 5);
+                        pthread_mutex_lock(&shared_memory->lock);
+                        shared_memory->request_counter++;
+
+                        if (prime) {
+                            if (num > shared_memory->highest_prime)
+                                shared_memory->highest_prime = num;
+                            printf("Request #%d: %lld is prime. Highest prime: %lld\n", shared_memory->request_counter, num, shared_memory->highest_prime);
+                        } else {
+                            printf("Request #%d: %lld is not prime.\n", shared_memory->request_counter, num);
+                        }
+                        pthread_mutex_unlock(&shared_memory->lock);
+
+                        sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", shared_memory->request_counter, num, prime ? "" : "not ", shared_memory->highest_prime);
+                        send(new_socket, buffer, strlen(buffer), 0);
+                    }
+
+                    if (valread <= 0) {
+                        printf("Client disconnected: socket fd %d\n", new_socket);
+                        close(new_socket);
+                        exit(EXIT_SUCCESS); // Exit child process upon client disconnection
+                    }
+                }
+            } else {
+                // Parent process continues to accept new connections
+                close(new_socket); // Parent process doesn't need this client socket
+            }
         }
     }
 
-    // הסרת זיכרון משותף
-    shmdt(shared_memory);
-
+    close(server_fd);
     return 0;
 }

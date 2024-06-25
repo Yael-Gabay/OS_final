@@ -12,39 +12,34 @@
 #include <sys/shm.h>
 #include <errno.h>
 #include <pthread.h>
-#include <semaphore.h>
-#include <fcntl.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 200
 #define BUFFER_SIZE 1024
 #define ll long long
 
-// פונקציה לחישוב (base^exp) % mod
 ll powerMod(ll base, ll exp, ll mod) {
     ll result = 1;
     base = base % mod;
     while (exp > 0) {
-        if (exp % 2 == 1) // אם exp אי-זוגי
+        if (exp % 2 == 1)
             result = (result * base) % mod;
-        exp = exp >> 1; // חלוקה ב-2
+        exp = exp >> 1;
         base = (base * base) % mod;
     }
     return result;
 }
 
-// פונקציה שעושה את הבדיקה העיקרית של מילר-רבין
 bool millerTest(ll d, ll n) {
-    ll a = 2 + rand() % (n - 4); // משתנה a: בחירת מספר אקראי בתחום [2, n-2]
-    ll x = powerMod(a, d, n);    // משתנה x: חישוב (a^d) % n
+    ll a = 2 + rand() % (n - 4);
+    ll x = powerMod(a, d, n);
 
     if (x == 1 || x == n - 1)
         return true;
 
-    // חישוב חוזר של x^2 % n
-    while (d != n - 1) { // משתנה d מחושב תחילה כ- n - 1 ומחולק ב-2 עד שהוא אי-זוגי
+    while (d != n - 1) {
         x = (x * x) % n;
-        d *= 2; // s (מספר הצעדים) 
+        d *= 2;
 
         if (x == 1)
             return false;
@@ -54,7 +49,6 @@ bool millerTest(ll d, ll n) {
     return false;
 }
 
-// פונקציה לבדוק ראשוניות בשיטת מילר-רבין
 bool isPrime(ll n, int k) {
     if (n <= 1 || n == 4)
         return false;
@@ -72,31 +66,18 @@ bool isPrime(ll n, int k) {
     return true;
 }
 
-// נתינת המספר הראשון הגבוה ביותר
 ll getHighestPrime(ll *shared_memory) {
-    return shared_memory[0];
+    return *shared_memory;
 }
 
-// עדכון המספר הראשוני הגבוה ביותר
 void updateHighestPrime(ll *shared_memory, ll num) {
-    shared_memory[0] = num;
+    *shared_memory = num;
 }
 
-// עדכון המונה
-void updateCounter(ll *shared_memory, int count) {
-    shared_memory[1] = count;
-}
-
-// נתינת המונה
-int getCounter(ll *shared_memory) {
-    return shared_memory[1];
-}
-
-// פונקציה לטיפול בלקוח חדש בתהליך ילד
-void handle_client(int client_socket, ll *shared_memory, sem_t *sem) {
+void handle_client(int client_socket, ll *shared_memory, int *request_count) {
     char buffer[BUFFER_SIZE];
     int valread;
-    int requestCounter = 0;
+    ll highest_prime = getHighestPrime(shared_memory);
 
     while (1) {
         valread = read(client_socket, buffer, BUFFER_SIZE - 1);
@@ -104,57 +85,33 @@ void handle_client(int client_socket, ll *shared_memory, sem_t *sem) {
             buffer[valread] = '\0';
             ll num = atoll(buffer);
 
-            // בדיקת ראשוניות ועדכון המספר הראשוני הגבוה ביותר
             srand(time(0));
             int prime = isPrime(num, 5);
-            
-            // נעילה לגישה בטוחה לזיכרון המשותף
-            sem_wait(sem);
+            (*request_count)++;
 
-            requestCounter = getCounter(shared_memory) + 1;
-            updateCounter(shared_memory, requestCounter);
-            
-            ll highest_prime = getHighestPrime(shared_memory);
             if (prime) {
                 if (num > highest_prime) {
                     highest_prime = num;
                     updateHighestPrime(shared_memory, num);
                 }
-                printf("Request #%d: %lld is prime. Highest prime: %lld\n", requestCounter, num, highest_prime);
+                printf("Request #%d: %lld is prime.\n", *request_count, num);
             } else {
-                printf("Request #%d: %lld is not prime.\n", requestCounter, num);
+                printf("Request #%d: %lld is not prime.\n", *request_count, num);
             }
 
-            // שחרור הנעילה
-            sem_post(sem);
-
-            sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", requestCounter, num, prime ? "" : "not ", highest_prime);
+            sprintf(buffer, "Request #%d: %lld is %sprime.\n", *request_count, num, prime ? "" : "not ");
             send(client_socket, buffer, strlen(buffer), 0);
-        } 
+
+            // Check if we've processed 100 requests or a multiple of 100
+            if (*request_count % 100 == 0 || *request_count == 100) {
+                printf("Report: Process detected %d numbers checked. The highest prime number so far is: %lld\n", *request_count, highest_prime);
+            }
+        }
         if (valread <= 0) {
             printf("Client disconnected: socket fd %d\n", client_socket);
             close(client_socket);
             break;
         }
-    }
-}
-
-// פונקציה לתהליך המעקב
-void monitor_process(ll *shared_memory, sem_t *sem) {
-    while (1) {
-        sleep(1); // המתנה לשנייה
-
-        // נעילה לגישה בטוחה לזיכרון המשותף
-        sem_wait(sem);
-
-        int count = getCounter(shared_memory);
-        if (count % 10 == 0 && count != 0) {
-            ll highest_prime = getHighestPrime(shared_memory);
-            printf("Monitor: Checked %d numbers. Highest prime so far: %lld\n", count, highest_prime);
-        }
-
-        // שחרור הנעילה
-        sem_post(sem);
     }
 }
 
@@ -164,10 +121,9 @@ int main() {
     int addrlen = sizeof(address);
     int shmid;
     ll *shared_memory;
-    sem_t *sem;
+    int request_count = 0;
 
-    // יצירת זיכרון משותף
-    shmid = shmget(IPC_PRIVATE, 2 * sizeof(ll), IPC_CREAT | 0666); // 2 מקומות: אחד למספר ואחד למונה
+    shmid = shmget(IPC_PRIVATE, sizeof(ll), IPC_CREAT | 0666);
     if (shmid < 0) {
         perror("shmget");
         exit(EXIT_FAILURE);
@@ -179,17 +135,8 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    shared_memory[0] = 0; // אתחול המספר הראשוני הגבוה ביותר ל-0
-    shared_memory[1] = 0; // אתחול המונה ל-0
+    *shared_memory = 0;
 
-    // יצירת semaphore
-    sem = sem_open("/sem_high_prime", O_CREAT, 0644, 1);
-    if (sem == SEM_FAILED) {
-        perror("sem_open");
-        exit(EXIT_FAILURE);
-    }
-
-    // יצירת כתובת וחיבור לשרת
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
@@ -209,18 +156,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    printf("The server is waiting for connections on port %d...\n", PORT);
-
-    // יצירת תהליך המעקב
-    pid_t monitor_pid = fork();
-    if (monitor_pid < 0) {
-        perror("fork");
-        exit(EXIT_FAILURE);
-    } else if (monitor_pid == 0) {
-        // תהליך המעקב
-        monitor_process(shared_memory, sem);
-        exit(EXIT_SUCCESS);
-    }
+    printf("Server listening on port %d\n", PORT);
 
     while (1) {
         if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
@@ -230,7 +166,6 @@ int main() {
         
         printf("New connection: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
 
-        // יצירת תהליך ילד עבור לקוח חדש
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
@@ -238,21 +173,16 @@ int main() {
             continue;
         }
 
-        if (pid == 0) { // תהליך ילד
-            close(server_fd); // סגירת קצה השרת האם, לטובת התהליך הילד
-            handle_client(new_socket, shared_memory, sem); // טיפול בלקוח המחובר
-            exit(0); // יציאה מהתהליך הילד
-        } else { // תהליך הורה
-            close(new_socket); // סגירת קצה הלקוח החדש, לטובת התהליך הורה
+        if (pid == 0) {
+            close(server_fd);
+            handle_client(new_socket, shared_memory, &request_count);
+            exit(0);
+        } else {
+            close(new_socket);
         }
     }
 
-    // הסרת זיכרון משותף
     shmdt(shared_memory);
-
-    // הסרת semaphore
-    sem_close(sem);
-    sem_unlink("/sem_high_prime");
 
     return 0;
 }
