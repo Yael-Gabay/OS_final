@@ -5,31 +5,60 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #define PORT 8080
+#define ll long long
 
-// Rabin-Miller primality test function
-bool isPrime(long long n, int iterations) {
+// פונקציה לחישוב (base^exp) % mod
+ll powerMod(ll base, ll exp, ll mod) {
+    ll result = 1;
+    base = base % mod;
+    while (exp > 0) {
+        if (exp % 2 == 1) // אם exp אי-זוגי
+            result = (result * base) % mod;
+        exp = exp >> 1; // חלוקה ב-2
+        base = (base * base) % mod;
+    }
+    return result;
+}
+
+// פונקציה שעושה את הבדיקה העיקרית של מילר-רבין
+bool millerTest(ll d, ll n) {
+    ll a = 2 + rand() % (n - 4); // משתנה a: בחירת מספר אקראי בתחום [2, n-2]
+    ll x = powerMod(a, d, n);    // משתנה x: חישוב (a^d) % n
+
+    if (x == 1 || x == n - 1)
+        return true;
+
+    // חישוב חוזר של x^2 % n
+    while (d != n - 1) { // משתנה d מחושב תחילה כ- n - 1 ומחולק ב-2 עד שהוא אי-זוגי
+        x = (x * x) % n;
+        d *= 2; // s (מספר הצעדים) 
+
+        if (x == 1)
+            return false;
+        if (x == n - 1)
+            return true;
+    }
+    return false;
+}
+
+// פונקציה לבדוק ראשוניות בשיטת מילר-רבין
+bool isPrime(ll n, int k) {
     if (n <= 1 || n == 4)
         return false;
     if (n <= 3)
         return true;
 
-    while (iterations > 0) {
-        long long a = 2 + (long long)rand() % (n - 4);
-        long long x = a % n;
-        long long y = n - 1;
-        long long result = 1;
-        while (y > 0) {
-            if (y & 1)
-                result = (result * x) % n;
-            y >>= 1;
-            x = (x * x) % n;
-        }
-        if (result != 1)
+    ll d = n - 1;
+    while (d % 2 == 0)
+        d /= 2;
+
+    for (int i = 0; i < k; i++)
+        if (!millerTest(d, n))
             return false;
-        iterations--;
-    }
+
     return true;
 }
 
@@ -48,6 +77,7 @@ int main() {
         perror("setsockopt");
         exit(EXIT_FAILURE);
     }
+
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
@@ -79,6 +109,8 @@ int main() {
         long long number;
         read(new_socket, &number, sizeof(number));
 
+        srand(time(0)); // אתחול מחולל המספרים האקראיים
+
         bool is_prime = isPrime(number, 5);
 
         if (is_prime) {
@@ -90,7 +122,7 @@ int main() {
         }
 
         // Send list of prime numbers to client
-        if (send(new_socket, primes, sizeof(primes), 0) < 0) {
+        if (send(new_socket, primes, primes_count * sizeof(long long), 0) < 0) {
             perror("Send failed");
             close(new_socket);
             continue;
@@ -102,6 +134,8 @@ int main() {
             printf("%lld ", primes[i]);
         }
         printf("\n\n");
+
+        close(new_socket);
     }
 
     close(server_fd);

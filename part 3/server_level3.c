@@ -1,24 +1,69 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/poll.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 200
 #define BUFFER_SIZE 1024
+#define ll long long
 
-// Function to check primality
-int is_prime(long long num) {
-    if (num <= 1) return 0;
-    if (num % 2 == 0 && num > 2) return 0;
-    for (long long i = 3; i * i <= num; i += 2) {
-        if (num % i == 0) return 0;
+// פונקציה לחישוב (base^exp) % mod
+ll powerMod(ll base, ll exp, ll mod) {
+    ll result = 1;
+    base = base % mod;
+    while (exp > 0) {
+        if (exp % 2 == 1) // אם exp אי-זוגי
+            result = (result * base) % mod;
+        exp = exp >> 1; // חלוקה ב-2
+        base = (base * base) % mod;
     }
-    return 1;
+    return result;
+}
+
+// פונקציה שעושה את הבדיקה העיקרית של מילר-רבין
+bool millerTest(ll d, ll n) {
+    ll a = 2 + rand() % (n - 4); // משתנה a: בחירת מספר אקראי בתחום [2, n-2]
+    ll x = powerMod(a, d, n);    // משתנה x: חישוב (a^d) % n
+
+    if (x == 1 || x == n - 1)
+        return true;
+
+    // חישוב חוזר של x^2 % n
+    while (d != n - 1) { // משתנה d מחושב תחילה כ- n - 1 ומחולק ב-2 עד שהוא אי-זוגי
+        x = (x * x) % n;
+        d *= 2; // s (מספר הצעדים) 
+
+        if (x == 1)
+            return false;
+        if (x == n - 1)
+            return true;
+    }
+    return false;
+}
+
+// פונקציה לבדוק ראשוניות בשיטת מילר-רבין
+bool isPrime(ll n, int k) {
+    if (n <= 1 || n == 4)
+        return false;
+    if (n <= 3)
+        return true;
+
+    ll d = n - 1;
+    while (d % 2 == 0)
+        d /= 2;
+
+    for (int i = 0; i < k; i++)
+        if (!millerTest(d, n))
+            return false;
+
+    return true;
 }
 
 int main() {
@@ -101,7 +146,8 @@ int main() {
                 if (valread > 0) {
                     buffer[valread] = '\0';
                     long long num = atoll(buffer);
-                    int prime = is_prime(num);
+                    srand(time(0)); // אתחול מחולל המספרים האקראיים
+                    int prime = isPrime(num, 5);
                     requestCounter++;
                     if (prime) {
                         if (num > highest_prime) highest_prime = num;

@@ -1,74 +1,131 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/poll.h>
 #include <arpa/inet.h>
+#include <time.h>
 #include <pthread.h>
 
 #define PORT 8080
-#define MAX_CLIENTS 200
 #define BUFFER_SIZE 1024
+#define ll long long
 
-pthread_mutex_t highest_prime_lock = PTHREAD_MUTEX_INITIALIZER;
-long long highest_prime = 0;
-int requestCounter = 0, clientCounter = 0;
-
-// Function to check primality
-int is_prime(long long num) {
-    if (num <= 1) return 0;
-    if (num % 2 == 0 && num > 2) return 0;
-    for (long long i = 3; i * i <= num; i += 2) {
-        if (num % i == 0) return 0;
+// Function to calculate (base^exp) % mod
+ll powerMod(ll base, ll exp, ll mod) {
+    ll result = 1;
+    base = base % mod;
+    while (exp > 0) {
+        if (exp % 2 == 1) // if exp is odd
+            result = (result * base) % mod;
+        exp = exp >> 1; // divide exp by 2
+        base = (base * base) % mod;
     }
-    return 1;
+    return result;
 }
 
-void* client_handler(void *arg) {
-    int client_fd = *((int*)arg);
-    char buffer[BUFFER_SIZE];
-    int valread = read(client_fd, buffer, BUFFER_SIZE - 1);
-    if (valread > 0) {
-        buffer[valread] = '\0';
-        long long num = atoll(buffer);
-        int prime = is_prime(num);
-        pthread_mutex_lock(&highest_prime_lock);
-        requestCounter++;
-        if (prime) {
-            if (num > highest_prime) highest_prime = num;
-            printf("Request #%d: %lld is prime. Highest prime: %lld\n", requestCounter, num, highest_prime);
-        } else {
-            printf("Request #%d: %lld is not prime.\n", requestCounter, num);
-        }
-        fflush(stdout);
+// Function to perform the core Miller-Rabin test
+bool millerTest(ll d, ll n) {
+    ll a = 2 + rand() % (n - 4); // random number in [2, n-2]
+    ll x = powerMod(a, d, n);    // Compute (a^d) % n
 
-        sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", requestCounter, num, prime ? "" : "not ", highest_prime);
-        send(client_fd, buffer, strlen(buffer), 0);
-        pthread_mutex_unlock(&highest_prime_lock);
-    } 
-    printf("\n");
+    if (x == 1 || x == n - 1)
+        return true;
 
+    // Repeat squaring x^2 % n
+    while (d != n - 1) {
+        x = (x * x) % n;
+        d *= 2; // s (number of steps)
 
-
-    if (valread <= 0) {
-        printf("Client disconnected: socket fd %d\n", client_fd);
-        close(client_fd);
+        if (x == 1)
+            return false;
+        if (x == n - 1)
+            return true;
     }
-    free(arg);
+    return false;
+}
+
+// Function to check primality using Miller-Rabin test
+bool isPrime(ll n, int k) {
+    if (n <= 1 || n == 4)
+        return false;
+    if (n <= 3)
+        return true;
+
+    ll d = n - 1;
+    while (d % 2 == 0)
+        d /= 2;
+
+    for (int i = 0; i < k; i++)
+        if (!millerTest(d, n))
+            return false;
+
+    return true;
+}
+
+typedef struct {
+    int fd;
+    pthread_mutex_t lock;
+    ll highest_prime;
+} client_info_t;
+
+pthread_mutex_t prime_mutex = PTHREAD_MUTEX_INITIALIZER;
+int requestCounter = 0;
+ll highest_prime = 0;
+
+void* client_handler(void* arg) {
+    client_info_t* client_info = (client_info_t*)arg;
+    int fd = client_info->fd;
+    ll* highest_prime_ptr = &(client_info->highest_prime);
+
+    char buffer[BUFFER_SIZE];
+    int valread;
+
+    while (1) {
+        valread = read(fd, buffer, BUFFER_SIZE - 1);
+        if (valread > 0) {
+            buffer[valread] = '\0';
+            ll num = atoll(buffer);
+            srand(time(0)); // Initialize random number generator
+            int prime = isPrime(num, 5);
+            
+            pthread_mutex_lock(&prime_mutex);
+            requestCounter++;
+            if (prime) {
+                if (num > highest_prime) {
+                    highest_prime = num;
+                    printf("Request #%d: %lld is prime. Highest prime: %lld\n", requestCounter, num, highest_prime);
+                }
+                *highest_prime_ptr = highest_prime;
+            } else {
+                printf("Request #%d: %lld is not prime.\n", requestCounter, num);
+            }
+
+            sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", requestCounter, num, prime ? "" : "not ", highest_prime);
+            send(fd, buffer, strlen(buffer), 0);
+            pthread_mutex_unlock(&prime_mutex);
+        } 
+        if (valread <= 0) {
+            printf("Client disconnected: socket fd %d\n", fd);
+            close(fd);
+            break;
+        }
+    }
+
+    pthread_mutex_lock(&client_info->lock);
+    client_info->fd = -1;
+    pthread_mutex_unlock(&client_info->lock);
+
+    free(client_info);
     return NULL;
 }
 
 int main() {
-    int server_fd, new_socket, addrlen;
+    int server_fd, new_socket, valread;
     struct sockaddr_in address;
-    struct pollfd fds[MAX_CLIENTS];
-    pthread_t tid[MAX_CLIENTS];
-
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    int addrlen = sizeof(address);
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
@@ -81,6 +138,10 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         exit(EXIT_FAILURE);
@@ -91,53 +152,37 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    fds[0].fd = server_fd;
-    fds[0].events = POLLIN;
-    memset(fds + 1, 0 , sizeof(struct pollfd) * (MAX_CLIENTS - 1));
-
-    printf("The server is waiting for connections...\n");
+    printf("The server is waiting for connections on port %d...\n", PORT);
 
     while (1) {
-        int activity = poll(fds, MAX_CLIENTS, -1);
-        if (activity < 0) {
-            perror("poll");
+        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+            perror("accept");
+            continue;
+        }
+        
+        printf("New connection: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+
+        // Handle the new client in a new thread
+        pthread_t thread;
+        client_info_t* client_info = (client_info_t*)malloc(sizeof(client_info_t));
+        if (!client_info) {
+            perror("Failed to allocate memory for client_info");
+            close(new_socket);
             continue;
         }
 
-        // Accept new connections
-        if (fds[0].revents & POLLIN) {
-            addrlen = sizeof(address);
-            new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
-            if (new_socket < 0) {
-                perror("accept");
-                continue;
-            }
-            clientCounter++;
-            printf("Client number %d connected: socket fd is %d, ip is: %s, port: %d\n", clientCounter, new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+        client_info->fd = new_socket;
+        client_info->highest_prime = 0;
+        pthread_mutex_init(&client_info->lock, NULL);
 
-            for (int i = 1; i < MAX_CLIENTS; i++) {
-                if (fds[i].fd == 0) {
-                    fds[i].fd = new_socket;
-                    fds[i].events = POLLIN;
-                    break;
-                }
-            }
+        if (pthread_create(&thread, NULL, client_handler, (void*)client_info) != 0) {
+            perror("Failed to create thread for client");
+            close(new_socket);
+            free(client_info);
+            continue;
         }
 
-        // Handle data from clients
-        for (int i = 1; i < MAX_CLIENTS; i++) {
-            if (fds[i].fd > 0 && (fds[i].revents & POLLIN)) {
-                int *arg = malloc(sizeof(*arg));
-                if (arg == NULL) {
-                    perror("Failed to allocate memory for client fd");
-                    continue;
-                }
-                *arg = fds[i].fd;
-                pthread_create(&tid[i], NULL, client_handler, arg);
-                pthread_detach(tid[i]);
-                fds[i].fd = 0; // Mark as available
-            }
-        }
+        pthread_detach(thread);
     }
 
     return 0;
