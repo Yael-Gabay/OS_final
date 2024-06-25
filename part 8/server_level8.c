@@ -6,18 +6,20 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/poll.h>
 #include <arpa/inet.h>
 #include <time.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <errno.h>
 #include <pthread.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 200
 #define BUFFER_SIZE 1024
 #define ll long long
 
+// Function to calculate (base^exp) % mod
 ll powerMod(ll base, ll exp, ll mod) {
     ll result = 1;
     base = base % mod;
@@ -30,6 +32,7 @@ ll powerMod(ll base, ll exp, ll mod) {
     return result;
 }
 
+// Function to perform Miller-Rabin primality test
 bool millerTest(ll d, ll n) {
     ll a = 2 + rand() % (n - 4);
     ll x = powerMod(a, d, n);
@@ -49,6 +52,7 @@ bool millerTest(ll d, ll n) {
     return false;
 }
 
+// Function to check primality using Miller-Rabin method
 bool isPrime(ll n, int k) {
     if (n <= 1 || n == 4)
         return false;
@@ -66,85 +70,60 @@ bool isPrime(ll n, int k) {
     return true;
 }
 
-ll getHighestPrime(ll *shared_memory) {
-    return *shared_memory;
-}
-
-void updateHighestPrime(ll *shared_memory, ll num) {
-    *shared_memory = num;
-}
-
-void handle_client(int client_socket, ll *shared_memory, int *request_count) {
-    char buffer[BUFFER_SIZE];
-    int valread;
-    ll highest_prime = getHighestPrime(shared_memory);
-
-    while (1) {
-        valread = read(client_socket, buffer, BUFFER_SIZE - 1);
-        if (valread > 0) {
-            buffer[valread] = '\0';
-            ll num = atoll(buffer);
-
-            srand(time(0));
-            int prime = isPrime(num, 5);
-            (*request_count)++;
-
-            if (prime) {
-                if (num > highest_prime) {
-                    highest_prime = num;
-                    updateHighestPrime(shared_memory, num);
-                }
-                printf("Request #%d: %lld is prime.\n", *request_count, num);
-            } else {
-                printf("Request #%d: %lld is not prime.\n", *request_count, num);
-            }
-
-            sprintf(buffer, "Request #%d: %lld is %sprime.\n", *request_count, num, prime ? "" : "not ");
-            send(client_socket, buffer, strlen(buffer), 0);
-
-            // Check if we've processed 100 requests or a multiple of 100
-            if (*request_count % 100 == 0 || *request_count == 100) {
-                printf("Report: Process detected %d numbers checked. The highest prime number so far is: %lld\n", *request_count, highest_prime);
-            }
-        }
-        if (valread <= 0) {
-            printf("Client disconnected: socket fd %d\n", client_socket);
-            close(client_socket);
-            break;
-        }
-    }
-}
+// Structure for shared memory
+typedef struct {
+    ll highest_prime;
+    int request_counter;
+    pthread_mutex_t lock;
+} shared_data_t;
 
 int main() {
-    int server_fd, new_socket, valread;
+    int server_fd, new_socket, addrlen;
     struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    int shmid;
-    ll *shared_memory;
-    int request_count = 0;
+    struct pollfd fds[MAX_CLIENTS];
+    char buffer[BUFFER_SIZE];
 
-    shmid = shmget(IPC_PRIVATE, sizeof(ll), IPC_CREAT | 0666);
-    if (shmid < 0) {
-        perror("shmget");
+    // Create shared memory
+    int shm_fd;
+    shared_data_t *shared_memory;
+    const char *shm_name = "/prime_shared_memory";
+
+    shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
+    if (shm_fd < 0) {
+        perror("shm_open");
         exit(EXIT_FAILURE);
     }
 
-    shared_memory = (ll *)shmat(shmid, NULL, 0);
-    if (shared_memory == (ll *)-1) {
-        perror("shmat");
+    if (ftruncate(shm_fd, sizeof(shared_data_t)) == -1) {
+        perror("ftruncate");
         exit(EXIT_FAILURE);
     }
 
-    *shared_memory = 0;
+    shared_memory = (shared_data_t *) mmap(NULL, sizeof(shared_data_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_memory == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
+
+    // Initialize shared memory
+    shared_memory->highest_prime = 0;
+    shared_memory->request_counter = 0;
+    pthread_mutex_init(&shared_memory->lock, NULL);
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
@@ -156,33 +135,80 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    printf("Server listening on port %d\n", PORT);
+    fds[0].fd = server_fd;
+    fds[0].events = POLLIN;
+    memset(fds + 1, 0, sizeof(struct pollfd) * (MAX_CLIENTS - 1));
+
+    printf("The server is waiting for connections on port %d...\n", PORT);
 
     while (1) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("accept");
-            continue;
-        }
-        
-        printf("New connection: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            close(new_socket);
+        int activity = poll(fds, MAX_CLIENTS, -1);
+        if (activity < 0) {
+            perror("poll");
             continue;
         }
 
-        if (pid == 0) {
-            close(server_fd);
-            handle_client(new_socket, shared_memory, &request_count);
-            exit(0);
-        } else {
-            close(new_socket);
+        // Accept new connections
+        if (fds[0].revents & POLLIN) {
+            addrlen = sizeof(address);
+            new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+            if (new_socket < 0) {
+                perror("accept");
+                continue;
+            }
+
+            printf("New connection: socket fd is %d, ip is: %s, port: %d\n", new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+
+            // Fork a new process for each client
+            pid_t pid = fork();
+            if (pid < 0) {
+                perror("fork");
+                continue;
+            } else if (pid == 0) {
+                // Child process handles client request
+                close(server_fd); // Child process doesn't need the listener socket
+
+                while (1) {
+                    int valread = read(new_socket, buffer, BUFFER_SIZE - 1);
+                    if (valread > 0) {
+                        buffer[valread] = '\0';
+                        ll num = atoll(buffer);
+                        int prime = isPrime(num, 5);
+                        pthread_mutex_lock(&shared_memory->lock);
+                        shared_memory->request_counter++;
+
+                        if (prime) {
+                            if (num > shared_memory->highest_prime)
+                                shared_memory->highest_prime = num;
+                            printf("Request #%d: %lld is prime. Highest prime: %lld\n", shared_memory->request_counter, num, shared_memory->highest_prime);
+                        } else {
+                            printf("Request #%d: %lld is not prime.\n", shared_memory->request_counter, num);
+                        }
+
+                        // Check if we've processed 10 requests
+                        if (shared_memory->request_counter % 10 == 0) {
+                            printf("Reporting highest prime number detected so far: %lld\n", shared_memory->highest_prime);
+                        }
+
+                        pthread_mutex_unlock(&shared_memory->lock);
+
+                        sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", shared_memory->request_counter, num, prime ? "" : "not ", shared_memory->highest_prime);
+                        send(new_socket, buffer, strlen(buffer), 0);
+                    }
+
+                    if (valread <= 0) {
+                        printf("Client disconnected: socket fd %d\n", new_socket);
+                        close(new_socket);
+                        exit(EXIT_SUCCESS); // Exit child process upon client disconnection
+                    }
+                }
+            } else {
+                // Parent process continues to accept new connections
+                close(new_socket); // Parent process doesn't need this client socket
+            }
         }
     }
 
-    shmdt(shared_memory);
-
+    close(server_fd);
     return 0;
 }
