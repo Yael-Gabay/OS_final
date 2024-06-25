@@ -185,8 +185,8 @@ int main() {
                             printf("Request #%d: %lld is not prime.\n", shared_memory->request_counter, num);
                         }
 
-                        // Check if we've processed 10 requests
-                        if (shared_memory->request_counter % 10 == 0) {
+                        // Check if we've processed 100 requests
+                        if (shared_memory->request_counter % 100 == 0) {
                             printf("Reporting highest prime number detected so far: %lld\n", shared_memory->highest_prime);
                         }
 
