@@ -1,0 +1,22 @@
+Request #1: 643 is prime. Highest prime: 643
+Request #2: 64 is not prime.
+Request #3: 5 is prime. Highest prime: 643
+Request #4: 76 is not prime.
+Request #5: 7633 is not prime.
+Request #6: 763665 is not prime.
+Request #7: 324 is not prime.
+Request #8: 32 is not prime.
+Request #9: 3 is prime. Highest prime: 643
+Request #10: 24 is not prime.
+Reporter: The highest prime number found so far is 643 after 10 requests
+Request #11: 24 is not prime.
+Request #12: 24 is not prime.
+Request #13: 24 is not prime.
+Request #14: 24 is not prime.
+Request #15: 24 is not prime.
+Request #16: 24 is not prime.
+Request #17: 24 is not prime.
+Request #18: 24 is not prime.
+Request #19: 24 is not prime.
+Request #20: 24 is not prime.
+Reporter: The highest prime number found so far is 643 after 20 requests
