@@ -1,5 +1,0 @@
-Request #1: 12 is not prime.
-Request #2: 14 is not prime.
-Request #3: 17 is prime. Highest prime: 17
-Request #4: 73 is prime. Highest prime: 73
-Request #5: 3 is prime. Highest prime: 73

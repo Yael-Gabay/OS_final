@@ -153,13 +153,16 @@ void proactor_run(proactor_t* proactor) {
                             proactor_add_fd(proactor, client_fd, proactor->sources[0].handler);
                         }
                     } else {
+                        int client_fd = proactor->fds[i].fd;
+                        proactor->fds[i].fd = -1; // Mark the fd as handled to prevent reprocessing
                         pid_t pid = fork();
                         if (pid == 0) { // child process
                             close(proactor->fds[0].fd); // close listening socket in child
-                            client_handler(proactor->sources[i].fd);
+                            client_handler(client_fd);
+                            printf("Client disconnected: socket fd %d\n", client_fd);
                             exit(0);
                         } else if (pid > 0) { // parent process
-                            close(proactor->sources[i].fd); // close client socket in parent
+                            close(client_fd); // close client socket in parent
                         } else {
                             perror("fork failed");
                         }
@@ -196,7 +199,6 @@ void client_handler(int fd) {
     }
 
     if (valread <= 0) {
-        printf("Client disconnected: socket fd %d\n", fd);
         close(fd);
     }
 }

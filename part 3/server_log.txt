@@ -1,9 +1,0 @@
-Request #1: 2 is prime. Highest prime: 2
-Request #2: 3 is prime. Highest prime: 3
-Request #3: 11 is prime. Highest prime: 11
-Request #4: 4 is not prime.
-Request #5: 96 is not prime.
-Request #6: 22 is not prime.
-Request #7: 35 is not prime.
-Request #8: 37 is prime. Highest prime: 37
-Request #9: 100 is not prime.
