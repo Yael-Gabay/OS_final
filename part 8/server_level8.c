@@ -40,26 +40,17 @@ typedef struct {
 // structure for shared data
 typedef struct {
     pthread_mutex_t lock;
+    pthread_cond_t cond;
     ll highest_prime;
     int requestCounter;
-    int numbersChecked; // count of numbers checked
 } shared_data_t;
 
 shared_data_t *shared_data;
 FILE *logFile;
-bool notification_initialized = false;
 
 // function declarations
 void client_handler(int fd);
-ll powerMod(ll base, ll exp, ll mod);
-bool millerTest(ll d, ll n);
-bool isPrime(ll n, int k);
-proactor_t* proactor_init();
-void* event_handler_wrapper(void* arg);
-void proactor_add_fd(proactor_t* proactor, int fd, handler_t handler);
-void proactor_run(proactor_t* proactor);
-void init_shared_memory();
-void check_notification_process();
+void proactor_mark_inactive(proactor_t *proactor, int index);
 
 // function to calculate (base^exp) % mod
 ll powerMod(ll base, ll exp, ll mod) {
@@ -164,31 +155,37 @@ void proactor_run(proactor_t* proactor) {
                             proactor_add_fd(proactor, client_fd, proactor->sources[0].handler);
                         }
                     } else {
-                        int client_fd = proactor->fds[i].fd;
-                        proactor->fds[i].fd = -1; // Mark the fd as handled to prevent reprocessing
+                        proactor_mark_inactive(proactor, i);
                         pid_t pid = fork();
                         if (pid == 0) { // child process
                             close(proactor->fds[0].fd); // close listening socket in child
-                            client_handler(client_fd);
-                            printf("Client disconnected: socket fd %d\n", client_fd);
+                            event_handler_wrapper(&proactor->sources[i].fd);
                             exit(0);
                         } else if (pid > 0) { // parent process
-                            close(client_fd); // close client socket in parent
+                            close(proactor->sources[i].fd); // close client socket in parent
                         } else {
                             perror("fork failed");
                         }
                     }
                 }
             }
-
-            // Check if numbersChecked is a multiple of 100 and trigger notification
-            pthread_mutex_lock(&shared_data->lock);
-            if (shared_data->numbersChecked > 0 && shared_data->numbersChecked % 100 == 0) {
-                check_notification_process();
-            }
-            pthread_mutex_unlock(&shared_data->lock);
         }
     }
+}
+
+void proactor_mark_inactive(proactor_t* proactor, int index) {
+    pthread_mutex_lock(&proactor->lock);
+    
+    // Mark the file descriptor as inactive
+    proactor->fds[index].fd = -1;
+
+    // Move the last active file descriptor to this position
+    int last_active_index = proactor->count - 1;
+    proactor->fds[index] = proactor->fds[last_active_index];
+    proactor->sources[index] = proactor->sources[last_active_index];
+    proactor->count--;
+
+    pthread_mutex_unlock(&proactor->lock);
 }
 
 // client handler function
@@ -203,8 +200,6 @@ void client_handler(int fd) {
 
         pthread_mutex_lock(&shared_data->lock);
         shared_data->requestCounter++;
-        shared_data->numbersChecked++; // Increment the count of numbers checked
-
         if (prime) {
             if (num > shared_data->highest_prime) shared_data->highest_prime = num;
             fprintf(logFile, "Request #%d: %lld is prime. Highest prime: %lld\n", shared_data->requestCounter, num, shared_data->highest_prime);
@@ -216,19 +211,29 @@ void client_handler(int fd) {
         sprintf(buffer, "Request #%d: %lld is %sprime. Highest prime so far: %lld\n", shared_data->requestCounter, num, prime ? "" : "not ", shared_data->highest_prime);
         send(fd, buffer, strlen(buffer), 0);
 
-        pthread_mutex_unlock(&shared_data->lock);
-
-        // Check notification process after each request
-        pthread_mutex_lock(&shared_data->lock);
-        if (shared_data->numbersChecked > 0 && shared_data->numbersChecked % 10 == 0) {
-            check_notification_process();
+        if (shared_data->requestCounter % 100 == 0) {
+            pthread_cond_signal(&shared_data->cond);
         }
         pthread_mutex_unlock(&shared_data->lock);
     }
 
     if (valread <= 0) {
+        printf("Client disconnected: socket fd %d\n", fd);
         close(fd);
     }
+}
+
+// reporter thread function
+void* reporter_thread(void* arg) {
+    while (1) {
+        pthread_mutex_lock(&shared_data->lock);
+        pthread_cond_wait(&shared_data->cond, &shared_data->lock);
+        printf("Reporter: The highest prime number found so far is %lld after %d requests\n", shared_data->highest_prime, shared_data->requestCounter);
+        fprintf(logFile, "Reporter: The highest prime number found so far is %lld after %d requests\n", shared_data->highest_prime, shared_data->requestCounter);
+        fflush(logFile);
+        pthread_mutex_unlock(&shared_data->lock);
+    }
+    return NULL;
 }
 
 // initialize shared memory
@@ -242,20 +247,16 @@ void init_shared_memory() {
     pthread_mutexattr_init(&mutex_attr);
     pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
     pthread_mutex_init(&shared_data->lock, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
+
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+    pthread_cond_init(&shared_data->cond, &cond_attr);
+    pthread_condattr_destroy(&cond_attr);
 
     shared_data->highest_prime = 0;
     shared_data->requestCounter = 0;
-    shared_data->numbersChecked = 0; // Initialize the numbers checked counter
-}
-
-// function for notification process
-void check_notification_process() {
-    if (!notification_initialized || (shared_data->numbersChecked > 0 && shared_data->numbersChecked % 100 == 0)) {
-        printf("Checked %d numbers. Highest suspected prime so far: %lld\n", shared_data->numbersChecked, shared_data->highest_prime);
-        fprintf(logFile, "Notification: Checked %d numbers. Highest suspected prime so far: %lld\n", shared_data->numbersChecked, shared_data->highest_prime);
-        fflush(logFile);
-        notification_initialized = true;
-    }
 }
 
 int main() {
@@ -301,6 +302,10 @@ int main() {
     // initialize shared memory
     init_shared_memory();
 
+    // create the reporter thread
+    pthread_t reporter;
+    pthread_create(&reporter, NULL, reporter_thread, NULL);
+
     // initialize Proactor
     proactor_t* proactor = proactor_init();
     proactor_add_fd(proactor, listen_fd, client_handler);
@@ -309,6 +314,9 @@ int main() {
     // cleanup
     fclose(logFile);
     pthread_mutex_destroy(&shared_data->lock); // destroy the lock
+    pthread_cond_destroy(&shared_data->cond);  // destroy the condition variable
     shm_unlink("/shared_memory"); // unlink the shared memory
+    pthread_cancel(reporter); // cancel the reporter thread
+    pthread_join(reporter, NULL); // join the reporter thread
     return 0;
 }
