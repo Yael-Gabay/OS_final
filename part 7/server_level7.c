@@ -38,6 +38,8 @@ pthread_mutex_t prime_mutex;
 pthread_mutex_t count_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t count_cond = PTHREAD_COND_INITIALIZER;
 
+void proactor_mark_inactive(proactor_t* proactor, int index);
+
 // פונקציה לחישוב (base^exp) % mod
 ll powerMod(ll base, ll exp, ll mod) {
     ll result = 1;
@@ -137,6 +139,7 @@ void proactor_run(proactor_t* proactor) {
                             proactor_add_fd(proactor, client_fd, proactor->sources[0].handler);
                         }
                     } else {
+                        proactor_mark_inactive(proactor, i);
                         pthread_t thread;
                         pthread_create(&thread, NULL, event_handler_wrapper, &proactor->sources[i]);
                         pthread_detach(thread);
@@ -146,6 +149,22 @@ void proactor_run(proactor_t* proactor) {
         }
     }
 }
+void proactor_mark_inactive(proactor_t* proactor, int index) {
+    pthread_mutex_lock(&proactor->lock);
+    
+    // Mark the file descriptor as inactive
+    proactor->fds[index].fd = -1;
+
+    // Move the last active file descriptor to this position
+    int last_active_index = proactor->count - 1;
+    proactor->fds[index] = proactor->fds[last_active_index];
+    proactor->sources[index] = proactor->sources[last_active_index];
+    proactor->count--;
+
+    pthread_mutex_unlock(&proactor->lock);
+}
+
+
 
 void* client_handler(int fd) {
     char buffer[BUFFER_SIZE];
